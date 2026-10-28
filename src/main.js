@@ -1,5 +1,6 @@
 import { DiscordSDK } from '@discord/embedded-app-sdk';
 import titleImage from '../img/title.png';
+import starImage from '../img/star.png';
 import './style.css';
 
 const root = document.querySelector('#app');
@@ -9,6 +10,7 @@ let results = [];
 let busy = false;
 
 root.innerHTML = `
+  <div class="floaties" id="floaties" aria-hidden="true"></div>
   <main class="shell">
     <section class="picker" aria-label="Dimgur GIF picker">
       <img class="title-image" src="${titleImage}" alt="Dimgur" />
@@ -23,6 +25,34 @@ const input = document.querySelector('#search');
 const message = document.querySelector('#message');
 const grid = document.querySelector('#results');
 const shell = document.querySelector('.shell');
+const floaties = document.querySelector('#floaties');
+
+const dotColors = ['#36e9b0', '#25b47c', '#1bb76e', '#5865f2', '#ffffff', '#7d7fa4'];
+for (let i = 0; i < 29; i += 1) {
+  const dot = document.createElement('i');
+  const size = 5 + Math.random() * 11;
+  dot.className = 'floaty-dot';
+  dot.style.left = `${Math.random() * 100}%`;
+  dot.style.top = `${Math.random() * 100}%`;
+  dot.style.width = `${size}px`;
+  dot.style.height = `${size}px`;
+  dot.style.backgroundColor = dotColors[i % dotColors.length];
+  dot.style.setProperty('--float-time', `${5 + Math.random() * 8}s`);
+  dot.style.setProperty('--float-delay', `${-Math.random() * 9}s`);
+  floaties.append(dot);
+}
+for (let i = 0; i < 8; i += 1) {
+  const star = document.createElement('img');
+  star.className = 'floaty-star';
+  star.src = starImage;
+  star.alt = '';
+  star.style.left = `${5 + Math.random() * 90}%`;
+  star.style.top = `${5 + Math.random() * 90}%`;
+  star.style.width = `${13 + Math.random() * 18}px`;
+  star.style.setProperty('--float-time', `${4 + Math.random() * 7}s`);
+  star.style.setProperty('--float-delay', `${-Math.random() * 8}s`);
+  floaties.append(star);
+}
 
 function setMessage(text, kind = '') {
   message.textContent = text;
@@ -59,7 +89,7 @@ form.addEventListener('submit', async (event) => {
   shell.classList.add('has-searched');
   busy = true;
   grid.replaceChildren();
-  setMessage('Searching Imgur…');
+  setMessage('Searching Imgur...');
   try {
     const response = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
     const data = await response.json();
@@ -73,9 +103,12 @@ form.addEventListener('submit', async (event) => {
       button.type = 'button';
       button.title = gif.title;
       const image = document.createElement('img');
-      image.src = gif.preview;
+      image.src = gif.url;
       image.alt = gif.title;
       image.loading = 'lazy';
+      image.onerror = () => {
+        if (image.src !== gif.preview) image.src = gif.preview;
+      };
       const title = document.createElement('span');
       title.textContent = gif.title;
       button.append(image, title);
