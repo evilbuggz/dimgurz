@@ -6,8 +6,16 @@ import './style.css';
 const root = document.querySelector('#app');
 let sdk;
 let auth;
-let results = [];
-let busy = false;
+let isSending = false;
+let searchTerm = '';
+let searchPage = 0;
+let bufferedListings = [];
+let bufferOffset = 0;
+let hasMorePages = false;
+let loadedListingCount = 0;
+let searchVersion = 0;
+let searchController;
+let loadingBatchVersion = null;
 
 root.innerHTML = `
   <div class="floaties" id="floaties" aria-hidden="true"></div>
@@ -26,6 +34,24 @@ const message = document.querySelector('#message');
 const grid = document.querySelector('#results');
 const shell = document.querySelector('.shell');
 const floaties = document.querySelector('#floaties');
+const rowObserver = 'IntersectionObserver' in window
+  ? new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) loadNextBatch(searchVersion);
+    }, { rootMargin: '350px 0px' })
+  : null;
+const videoObserver = 'IntersectionObserver' in window
+  ? new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        const video = entry.target;
+        if (entry.isIntersecting) {
+          if (!video.src && video.dataset.src) video.src = video.dataset.src;
+          video.play().catch(() => {});
+        } else {
+          video.pause();
+        }
+      }
+    }, { rootMargin: '450px 0px' })
+  : null;
 
 const dotColors = ['#36e9b0', '#25b47c', '#1bb76e', '#5865f2', '#ffffff', '#7d7fa4'];
 for (let i = 0; i < 29; i += 1) {
@@ -85,46 +111,133 @@ async function setup() {
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
   const query = input.value.trim();
-  if (query.length < 2 || busy) return;
+  if (query.length < 2) return;
+  searchController?.abort();
+  searchController = new AbortController();
+  searchVersion += 1;
+  const version = searchVersion;
+  searchTerm = query;
+  searchPage = 0;
+  bufferedListings = [];
+  bufferOffset = 0;
+  hasMorePages = true;
+  loadedListingCount = 0;
+  loadingBatchVersion = null;
+  rowObserver?.disconnect();
+  videoObserver?.disconnect();
   shell.classList.add('has-searched');
-  busy = true;
   grid.replaceChildren();
   setMessage('Searching Imgur...');
-  try {
-    const response = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || 'Search failed.');
-    results = data.results;
-    if (!results.length) return setMessage('No animated GIFs found. Try a different search.');
-    setMessage(`${results.length} GIF${results.length === 1 ? '' : 's'} found. Pick one to send.`);
-    for (const [index, gif] of results.entries()) {
-      const button = document.createElement('button');
-      button.className = 'gif-card';
-      button.type = 'button';
-      button.title = gif.title;
-      const image = document.createElement('img');
-      image.src = gif.url;
-      image.alt = gif.title;
-      image.loading = 'lazy';
-      image.onerror = () => {
-        if (image.src !== gif.preview) image.src = gif.preview;
-      };
-      const title = document.createElement('span');
-      title.textContent = gif.title;
-      button.append(image, title);
-      button.addEventListener('click', () => sendGif(gif, button));
-      grid.append(button);
-    }
-  } catch (error) {
-    setMessage(error.message, 'error');
-  } finally {
-    busy = false;
-  }
+  await loadNextBatch(version);
 });
 
+function rowsPerBatch() {
+  const columns = getComputedStyle(grid).gridTemplateColumns.trim().split(/\s+/).length || 1;
+  return columns * 5;
+}
+
+function appendListing(listing) {
+  const button = document.createElement('button');
+  button.className = 'gif-card';
+  button.type = 'button';
+  button.title = listing.title;
+
+  if (listing.animated && listing.videoPreview) {
+    const video = document.createElement('video');
+    video.className = 'gif-preview';
+    video.poster = listing.preview;
+    video.dataset.src = listing.videoPreview;
+    video.muted = true;
+    video.loop = true;
+    video.autoplay = true;
+    video.playsInline = true;
+    video.preload = 'none';
+    video.setAttribute('aria-label', listing.title);
+    video.addEventListener('error', () => {
+      const poster = document.createElement('img');
+      poster.src = listing.preview;
+      poster.alt = listing.title;
+      poster.loading = 'lazy';
+      video.replaceWith(poster);
+    }, { once: true });
+    button.append(video);
+    if (videoObserver) videoObserver.observe(video);
+    else {
+      video.src = listing.videoPreview;
+      video.load();
+    }
+  } else {
+    const image = document.createElement('img');
+    image.src = listing.preview;
+    image.alt = listing.title;
+    image.loading = 'lazy';
+    button.append(image);
+  }
+
+  const title = document.createElement('span');
+  title.textContent = listing.title;
+  button.append(title);
+  button.addEventListener('click', () => sendGif(listing, button));
+  grid.append(button);
+}
+
+async function loadNextBatch(version) {
+  if (version !== searchVersion || loadingBatchVersion === version) return;
+  const oldSentinel = document.querySelector('.load-sentinel');
+  if (oldSentinel) {
+    rowObserver?.unobserve(oldSentinel);
+    oldSentinel.remove();
+  }
+  loadingBatchVersion = version;
+  try {
+    while (version === searchVersion && bufferOffset >= bufferedListings.length && hasMorePages) {
+      const params = new URLSearchParams({ q: searchTerm, page: String(searchPage) });
+      const response = await fetch(`/api/search?${params}`, { signal: searchController.signal });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Search failed.');
+      if (version !== searchVersion) return;
+      bufferedListings = data.results || [];
+      bufferOffset = 0;
+      hasMorePages = Boolean(data.hasMore);
+      searchPage += 1;
+      if (!bufferedListings.length && !hasMorePages) break;
+    }
+
+    if (version !== searchVersion) return;
+    const batch = bufferedListings.slice(bufferOffset, bufferOffset + rowsPerBatch());
+    bufferOffset += batch.length;
+    batch.forEach(appendListing);
+    loadedListingCount += batch.length;
+
+    if (!loadedListingCount && !hasMorePages && bufferOffset >= bufferedListings.length) {
+      setMessage('No Imgur listings found. Try another search.');
+      return;
+    }
+    if (loadedListingCount) setMessage(`Loaded ${loadedListingCount} listings. Scroll for more.`);
+
+    if (bufferOffset < bufferedListings.length || hasMorePages) {
+      let sentinel = document.querySelector('.load-sentinel');
+      if (!sentinel) {
+        sentinel = document.createElement('div');
+        sentinel.className = 'load-sentinel';
+        sentinel.setAttribute('aria-hidden', 'true');
+        grid.append(sentinel);
+      }
+      rowObserver?.observe(sentinel);
+    } else {
+      document.querySelector('.load-sentinel')?.remove();
+      setMessage(`All ${loadedListingCount} listings loaded.`);
+    }
+  } catch (error) {
+    if (error.name !== 'AbortError' && version === searchVersion) setMessage(error.message, 'error');
+  } finally {
+    if (loadingBatchVersion === version) loadingBatchVersion = null;
+  }
+}
+
 async function sendGif(gif, button) {
-  if (busy) return;
-  busy = true;
+  if (isSending) return;
+  isSending = true;
   button.classList.add('sending');
   setMessage('Sending GIF to this channel…');
   try {
@@ -141,7 +254,7 @@ async function sendGif(gif, button) {
     setMessage(error.message, 'error');
     button.classList.remove('sending');
   } finally {
-    busy = false;
+    isSending = false;
   }
 }
 
